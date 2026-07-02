@@ -2,9 +2,11 @@ FROM golang:1.25-alpine AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
-COPY main.go ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go build -o /app/server .
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /app/server .
 
 FROM alpine:3.21
 
