@@ -45,6 +45,8 @@ func (e *StreamExecutor) ExecuteStream(
 ) (<-chan StreamChunk, http.Header) {
 	dataChan := make(chan StreamChunk, 100)
 
+	modelName = ResolveUpstreamModel(modelName)
+
 	// Convert Anthropic request to OpenAI format
 	convertedBody := claude.ConvertClaudeRequestToOpenAI(modelName, originalRequest, stream)
 

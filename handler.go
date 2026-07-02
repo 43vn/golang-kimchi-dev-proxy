@@ -89,11 +89,17 @@ func anthropicMessagesHandler(client *http.Client) gin.HandlerFunc {
 			return
 		}
 
-		model, _ := raw["model"].(string)
-		if model == "" {
+		requestedModel, _ := raw["model"].(string)
+		if requestedModel == "" {
 			log.Printf("[REQUEST] session=%s error=missing_model body=%s", sessionID, truncateBody(bodyBytes, 500))
 			c.Data(http.StatusBadRequest, "application/json", anthropicErrorJSON("invalid_request_error", "model is required"))
 			return
+		}
+
+		model := ResolveUpstreamModel(requestedModel)
+		if model != requestedModel {
+			bodyBytes = applyModelToRequestBody(bodyBytes, model)
+			log.Printf("[REQUEST] session=%s model_override requested=%s upstream=%s", sessionID, requestedModel, model)
 		}
 
 		// Extract API key
@@ -120,22 +126,14 @@ func anthropicMessagesHandler(client *http.Client) gin.HandlerFunc {
 // handleStreamingWithExecutor handles streaming using channel-based architecture
 func handleStreamingWithExecutor(c *gin.Context, executor *StreamExecutor, apiKey, model string, bodyBytes []byte, sessionID string, startTime time.Time) {
 	ctx := c.Request.Context()
-	dataChan, upstreamHeaders := executor.ExecuteStream(ctx, apiKey, model, bodyBytes, true)
+	dataChan, _ := executor.ExecuteStream(ctx, apiKey, model, bodyBytes, true)
 
-	// Set streaming headers
+	// Set streaming headers (do not copy upstream Content-Type — OpenAI SSE
+	// headers must not overwrite Anthropic event-stream framing).
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
-
-	// Copy upstream headers
-	if upstreamHeaders != nil {
-		for k, vv := range upstreamHeaders {
-			for _, v := range vv {
-				c.Writer.Header().Set(k, v)
-			}
-		}
-	}
 
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -146,20 +144,23 @@ func handleStreamingWithExecutor(c *gin.Context, executor *StreamExecutor, apiKe
 	var terminalErr error
 
 	ForwardStream(ctx, c.Writer, flusher, dataChan, StreamForwardOptions{
+		// Chunks from ConvertOpenAIResponseToClaude are already full Anthropic
+		// SSE events (event: … / data: …). Do not wrap again with "data: ".
 		WriteChunk: func(chunk []byte) {
-			c.Writer.Write([]byte("data: "))
+			if len(chunk) == 0 {
+				return
+			}
 			c.Writer.Write(chunk)
-			c.Writer.Write([]byte("\n\n"))
 			chunkCount++
 		},
 		WriteTerminalError: func(err error) {
 			terminalErr = err
 			log.Printf("[STREAM_ERROR] session=%s err=%v", sessionID, err)
 
-			// Write error as SSE event
 			if upstreamErr, ok := err.(*UpstreamError); ok {
-				c.Writer.Write([]byte("data: "))
-				c.Writer.Write(upstreamErr.Body)
+				errJSON := anthropicErrorJSON("api_error", string(upstreamErr.Body))
+				c.Writer.Write([]byte("event: error\ndata: "))
+				c.Writer.Write(errJSON)
 				c.Writer.Write([]byte("\n\n"))
 			}
 		},

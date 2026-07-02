@@ -293,6 +293,34 @@ func RestoreSanitizedToolName(toolNameMap map[string]string, sanitizedName strin
 	return sanitizedName
 }
 
+// miniMaxMarkupEscape is inserted by MiniMax models before '<' and after '>'
+// in XML-like tool call payloads so upstream XML parsers do not break.
+const miniMaxMarkupEscape = "]<]minimax[>["
+
+// IsMiniMaxModel reports whether the upstream model name refers to MiniMax.
+func IsMiniMaxModel(modelName string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "minimax")
+}
+
+// UnescapeMiniMaxMarkup removes MiniMax angle-bracket escape tokens.
+func UnescapeMiniMaxMarkup(s string) string {
+	if s == "" || !strings.Contains(s, miniMaxMarkupEscape) {
+		return s
+	}
+	return strings.ReplaceAll(s, miniMaxMarkupEscape, "")
+}
+
+// SanitizeUpstreamText unescapes MiniMax markup when the upstream model is
+// MiniMax or when the payload already contains MiniMax escape tokens. The
+// latter matters for Claude Code clients that request claude-* model aliases
+// while the upstream body still carries minimax-escaped tool arguments.
+func SanitizeUpstreamText(modelName, s string) string {
+	if !IsMiniMaxModel(modelName) && !strings.Contains(s, miniMaxMarkupEscape) {
+		return s
+	}
+	return UnescapeMiniMaxMarkup(s)
+}
+
 func escapeGJSONPathKey(key string) string {
 	var out strings.Builder
 	for _, r := range key {
